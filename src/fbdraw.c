@@ -13,11 +13,12 @@
 
 static inline int _location(struct fb *fb, int x, int y)
 {
-	return x + fb->vinfo.xoffset * (fb->vinfo.bits_per_pixel >> 3) + (y + fb->vinfo.yoffset) * fb->finfo.line_length;
+	return (x + fb->vinfo.xoffset  + (y + fb->vinfo.yoffset) * fb->vinfo.xres_virtual) * (fb->vinfo.bits_per_pixel >> 3);
 }
 
-extern inline void buffer_swap(struct fb *fb)
+void buffer_swap(struct fb *fb)
 {
+#ifdef LARGE_BUF
 	if (fb->vinfo.yoffset == 0) {
 		fb->vinfo.yoffset = fb->screensize;
 	} else {
@@ -25,6 +26,10 @@ extern inline void buffer_swap(struct fb *fb)
 	}
 	ioctl(fb->fd, FBIOPAN_DISPLAY, &fb->vinfo);
 	SWAP(uint8_t*, fb->front, fb->back);
+#else
+	int offset = (fb->vinfo.xoffset + fb->vinfo.yoffset * fb->vinfo.xres_virtual) * (fb->vinfo.bits_per_pixel >> 3);
+	memcpy(fb->front + offset, fb->back + offset, fb->screensize - offset);
+#endif
 }
 int set_color(struct fb *fb, uint32_t color)
 {
@@ -43,7 +48,14 @@ int set_pixel(struct fb *fb, int x, int y)
 
 int fb_uninit(struct fb *fb)
 {
-	munmap(fb->front, fb->screensize * 2);
+#ifdef LARGE_BUF
+	munmap(fb->front, 2 * fb->screensize);
+#else
+	munmap(fb->front, fb->screensize);
+	free(fb->back);
+	fb->back = NULL;
+#endif
+	fb->front = NULL;
 	close(fb->fd);
 	return 0;
 }
@@ -64,19 +76,20 @@ int fb_init(struct fb *fb)
 	ioctl(fb->fd, FBIOGET_VSCREENINFO, &fb->vinfo);
 	ioctl(fb->fd, FBIOGET_FSCREENINFO, &fb->finfo);
 	fb->screensize = fb->vinfo.yres_virtual * fb->finfo.line_length;
-	fb->front = mmap(0, fb->screensize * 2, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
+#ifdef LARGE_BUF
+	fb->front = mmap(0, 2 * fb->screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
+	fb->back = fb->front + fb->screensize;
+#else
+	fb->front = mmap(0, fb->screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
+	fb->back = malloc(fb->screensize);
+	memcpy(fb->back, fb->front, fb->screensize);
+#endif
 	if (fb->front == MAP_FAILED) {
 		perror("mmap");
 		return -1;
 	}
-	fb->back = fb->front + fb->screensize;
 	fb->color = pixel_color(0, 0, 0, &fb->vinfo);
 	return 0;
-}
-
-static inline uint32_t pixel_color(uint8_t r, uint8_t g, uint8_t b, struct fb_var_screeninfo *vinfo)
-{
-	return (r<<vinfo->red.offset) | (g << vinfo->green.offset) | (b << vinfo->blue.offset);
 }
 
 int fill_screen(struct fb *fb)

@@ -27,7 +27,11 @@ int draw_straight_line(struct fb *fb, struct pt from, struct pt to, int width);
 int draw_line(struct fb *fb, struct pt from, struct pt to, int width);
 int fill_circle(struct fb *fb, struct pt origin, int radius);
 int set_pixel(struct fb *fb, int x, int y);
+static inline uint32_t pixel_color(uint8_t r, uint8_t g, uint8_t b, struct fb_var_screeninfo *vinfo)
+{
+	return (r<<vinfo->red.offset) | (g << vinfo->green.offset) | (b << vinfo->blue.offset);
+}
 
-static inline uint32_t pixel_color(uint8_t r, uint8_t g, uint8_t b, struct fb_var_screeninfo *vinfo);
-inline void buffer_swap(struct fb *fb);
+
+void buffer_swap(struct fb *fb);
 #endif
