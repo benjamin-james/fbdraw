@@ -23,7 +23,7 @@ int set_pixel_32(struct fb *fb, int offset, int color)
 	if (offset < 0 || offset > fb->fb_var_info.xres * fb->fb_var_info.yres) {
 		return -1;
 	}
-	*(((unsigned int*) fb->screen) + offset) = color;
+	*(((unsigned int*) (fb->buffer + fb->offset)) + offset) = color;
 	return 0;
 }
 int set_pixel_8(struct fb *fb, int offset, int color)
@@ -33,7 +33,7 @@ int set_pixel_8(struct fb *fb, int offset, int color)
 	} else if (offset > fb->fb_var_info.xres * fb->fb_var_info.yres) {
 		offset = fb->fb_var_info.xres * fb->fb_var_info.yres;
 	}
-	*(fb->screen + offset) = (char)color;
+	*(fb->buffer + fb->offset + offset) = (char)color;
 	return 0;
 }
 
@@ -69,14 +69,15 @@ int fb_init(struct fb *fb)
 		break;
 	}
 	}
+	fb->offset = (fb->fb_var_info.xoffset + fb->fb_var_info.yoffset * fb->fb_var_info.xres_virtual) * (fb->fb_var_info.bits_per_pixel >> 3);
 	fb->screen = mmap(0, fb->fb_fix_info.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
-	fb->screen += (fb->fb_var_info.xoffset + fb->fb_var_info.yoffset * fb->fb_var_info.xres_virtual) * (fb->fb_var_info.bits_per_pixel >> 3);
+	fb->buffer = fb->screen;
 	return 0;
 }
 
 int fill_screen(struct fb *fb, int color)
 {
-	return fb->memset(fb->screen, color, fb->fb_var_info.xres * fb->fb_var_info.yres);
+	return fb->memset(fb->buffer + fb->offset, color, fb->fb_var_info.xres * fb->fb_var_info.yres);
 }
 
 int fill_rect(struct fb *fb, struct rect r, int color)
@@ -89,7 +90,7 @@ int fill_rect(struct fb *fb, struct rect r, int color)
 		r.h = fb->fb_var_info.yres - r.y;
 	}
 	for (cy = r.y; cy < r.y + r.h; cy++) {
-		fb->memset(((unsigned int*)fb->screen) + fb->fb_var_info.xres * cy + r.x, color, r.w);
+		fb->memset(((unsigned int*)fb->buffer + fb->offset) + fb->fb_var_info.xres * cy + r.x, color, r.w);
 	}
 	return 0;
 }
@@ -131,6 +132,17 @@ int refresh(struct fb *fb)
 	return ioctl(fb->fd, FBIOGET_VSCREENINFO, &fb->fb_var_info);
 }
 
+int fill_circle(struct fb *fb, struct pt origin, int radius, int color)
+{
+	for (int y = -radius; y < radius; y++) {
+		for (int x = -radius; x < radius; x++) {
+			if (x*x + y*y <= radius * radius) {
+				fb->set_pixel(fb, origin.x + x + fb->fb_var_info.xres * (origin.y + y), color);
+			}
+		}
+	}
+	return 0;
+}
 int draw_line(struct fb *fb, struct pt from, struct pt to, int width, int color)
 {
 	if (from.y == to.y || from.x == to.x) {
