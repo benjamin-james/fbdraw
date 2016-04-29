@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -10,36 +11,39 @@
 
 #define SWAP(T,x,y) {T *p = &(x); T *q = &(y); T z = *p; *p = *q; *q = z;}
 
-int memset8(void *dest, unsigned int data, size_t len)
+static inline int _location(struct fb *fb, int x, int y)
 {
-	return memset(dest, data, len) == NULL ? -1 : 0;
+	return x + fb->vinfo.xoffset * (fb->vinfo.bits_per_pixel >> 3) + (y + fb->vinfo.yoffset) * fb->finfo.line_length;
 }
-int memset32(void *dest, unsigned int data, size_t len)
+
+extern inline void buffer_swap(struct fb *fb)
 {
-	return wmemset(dest, data, len) == NULL ? -1 : 0;
-}
-int set_pixel_32(struct fb *fb, int offset, int color)
-{
-	if (offset < 0 || offset > fb->fb_var_info.xres * fb->fb_var_info.yres) {
-		return -1;
+	if (fb->vinfo.yoffset == 0) {
+		fb->vinfo.yoffset = fb->screensize;
+	} else {
+		fb->vinfo.yoffset = 0;
 	}
-	*(((unsigned int*) (fb->buffer + fb->offset)) + offset) = color;
+	ioctl(fb->fd, FBIOPAN_DISPLAY, &fb->vinfo);
+	SWAP(uint8_t*, fb->front, fb->back);
+}
+int set_color(struct fb *fb, uint32_t color)
+{
+	fb->color = color;
 	return 0;
 }
-int set_pixel_8(struct fb *fb, int offset, int color)
+int set_pixel(struct fb *fb, int x, int y)
 {
-	if (offset < 0) {
-		offset = 0;
-	} else if (offset > fb->fb_var_info.xres * fb->fb_var_info.yres) {
-		offset = fb->fb_var_info.xres * fb->fb_var_info.yres;
+	if (x < 0 || x > fb->vinfo.xres || y < 0 || y > fb->vinfo.yres) {
+		return -1;
 	}
-	*(fb->buffer + fb->offset + offset) = (char)color;
+	int offset = _location(fb, x, y);
+	memcpy(fb->back + offset, &fb->color, sizeof(fb->color));
 	return 0;
 }
 
 int fb_uninit(struct fb *fb)
 {
-	munmap(fb->screen, fb->fb_fix_info.smem_len);
+	munmap(fb->front, fb->screensize * 2);
 	close(fb->fd);
 	return 0;
 }
@@ -50,52 +54,68 @@ int fb_init(struct fb *fb)
 	if (fb->fd < 0) {
 		fb->fd = open("/dev/graphics/fb0", O_RDWR);
 		if (fb->fd < 0) {
+			perror("open");
 			return -1;
 		}
 	}
-	ioctl(fb->fd, FBIOGET_VSCREENINFO, &fb->fb_var_info);
-	ioctl(fb->fd, FBIOGET_FSCREENINFO, &fb->fb_fix_info);
-	switch (fb->fb_var_info.bits_per_pixel) {
-	case 8: {
-		fb->memset = &memset8;
-		fb->set_pixel = &set_pixel_8;
-		break;
+	ioctl(fb->fd, FBIOGET_VSCREENINFO, &fb->vinfo);
+	fb->vinfo.grayscale = 0;
+	fb->vinfo.bits_per_pixel = 32;
+	ioctl(fb->fd, FBIOGET_VSCREENINFO, &fb->vinfo);
+	ioctl(fb->fd, FBIOGET_FSCREENINFO, &fb->finfo);
+	fb->screensize = fb->vinfo.yres_virtual * fb->finfo.line_length;
+	fb->front = mmap(0, fb->screensize * 2, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
+	if (fb->front == MAP_FAILED) {
+		perror("mmap");
+		return -1;
 	}
-	case 16:
-	case 24:
-	case 32: {
-		fb->memset = &memset32;
-		fb->set_pixel = &set_pixel_32;
-		break;
-	}
-	}
-	fb->offset = (fb->fb_var_info.xoffset + fb->fb_var_info.yoffset * fb->fb_var_info.xres_virtual) * (fb->fb_var_info.bits_per_pixel >> 3);
-	fb->screen = mmap(0, fb->fb_fix_info.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fb->fd, 0);
-	fb->buffer = fb->screen;
+	fb->back = fb->front + fb->screensize;
+	fb->color = pixel_color(0, 0, 0, &fb->vinfo);
 	return 0;
 }
 
-int fill_screen(struct fb *fb, int color)
+static inline uint32_t pixel_color(uint8_t r, uint8_t g, uint8_t b, struct fb_var_screeninfo *vinfo)
 {
-	return fb->memset(fb->buffer + fb->offset, color, fb->fb_var_info.xres * fb->fb_var_info.yres);
+	return (r<<vinfo->red.offset) | (g << vinfo->green.offset) | (b << vinfo->blue.offset);
 }
 
-int fill_rect(struct fb *fb, struct rect r, int color)
+int fill_screen(struct fb *fb)
+{
+	/*
+	size_t block_size = sizeof(fb->color);
+	uint8_t offset = fb->vinfo.xoffset * (fb->vinfo.bits_per_pixel >> 3) + fb->vinfo.yoffset * fb->finfo.line_length;
+	memmove(fb->back + offset, &fb->color, block_size);
+	uint8_t *start = fb->back + offset;
+	uint8_t *current = start + block_size;
+	uint8_t *end = fb->back + fb->screensize;
+	while (current + block_size < end) {
+		memmove(current, start, block_size);
+		current += block_size;
+		block_size *= 2;
+	}
+	return memmove(current, start, (size_t)(end-current)) == NULL ? -1 : 0;
+	*/
+	return wmemset((wchar_t *)fb->back, fb->color, fb->screensize) == NULL ? -1 : 0;
+}
+
+int fill_rect(struct fb *fb, struct rect r)
 {
 	int cx, cy;
-	if (r.x + r.w > fb->fb_var_info.xres) {
-		r.w = fb->fb_var_info.xres - r.x;
+	if (r.x + r.w > fb->vinfo.xres) {
+		r.w = fb->vinfo.xres - r.x;
 	}
-	if (r.y + r.h > fb->fb_var_info.yres) {
-		r.h = fb->fb_var_info.yres - r.y;
+	if (r.y + r.h > fb->vinfo.yres) {
+		r.h = fb->vinfo.yres - r.y;
 	}
 	for (cy = r.y; cy < r.y + r.h; cy++) {
-		fb->memset(((unsigned int*)fb->buffer + fb->offset) + fb->fb_var_info.xres * cy + r.x, color, r.w);
+		for (cx = r.x; cx < r.x + r.w; cx++) {
+			set_pixel(fb, cx, cy);
+		}
 	}
 	return 0;
 }
 
-int draw_straight_line(struct fb *fb, struct pt from, struct pt to, int width, int color)
+int draw_straight_line(struct fb *fb, struct pt from, struct pt to, int width)
 {
 	struct rect r;
 	if (from.y == to.y) {
@@ -121,32 +141,32 @@ int draw_straight_line(struct fb *fb, struct pt from, struct pt to, int width, i
 	} else {
 		return -1;
 	}
-	return fill_rect(fb, r, color);
+	return fill_rect(fb, r);
 }
 
 int refresh(struct fb *fb)
 {
-	fb->fb_var_info.activate |= FB_ACTIVATE_NOW | FB_ACTIVATE_FORCE;
-	fb->fb_var_info.yres_virtual = fb->fb_var_info.yres * 2;
-	fb->fb_var_info.yoffset = fb->fb_var_info.yres;
-	return ioctl(fb->fd, FBIOGET_VSCREENINFO, &fb->fb_var_info);
+	fb->vinfo.activate |= FB_ACTIVATE_NOW | FB_ACTIVATE_FORCE;
+	fb->vinfo.yres_virtual = fb->vinfo.yres * 2;
+	fb->vinfo.yoffset = fb->vinfo.yres;
+	return ioctl(fb->fd, FBIOGET_VSCREENINFO, &fb->vinfo);
 }
 
-int fill_circle(struct fb *fb, struct pt origin, int radius, int color)
+int fill_circle(struct fb *fb, struct pt origin, int radius)
 {
 	for (int y = -radius; y < radius; y++) {
 		for (int x = -radius; x < radius; x++) {
 			if (x*x + y*y <= radius * radius) {
-				fb->set_pixel(fb, origin.x + x + fb->fb_var_info.xres * (origin.y + y), color);
+				set_pixel(fb, origin.x + x, origin.y + y);
 			}
 		}
 	}
 	return 0;
 }
-int draw_line(struct fb *fb, struct pt from, struct pt to, int width, int color)
+int draw_line(struct fb *fb, struct pt from, struct pt to, int width)
 {
 	if (from.y == to.y || from.x == to.x) {
-		return draw_straight_line(fb, from, to, (int)width, color);
+		return draw_straight_line(fb, from, to, width);
 	}
 	int steep = abs(from.y - to.y) > abs(from.x - to.x);
 	if (steep) {
@@ -164,9 +184,9 @@ int draw_line(struct fb *fb, struct pt from, struct pt to, int width, int color)
 	int y = from.y;
 	for (int x = from.x; x < to.x; x++) {
 		if (steep) {
-			fb->set_pixel(fb, y + fb->fb_var_info.xres * x, color);
+			set_pixel(fb, y, x);
 		} else {
-			fb->set_pixel(fb, x + fb->fb_var_info.xres * y, color);
+			set_pixel(fb, x, y);
 		}
 		error -= dy;
 		if (error < 0) {
